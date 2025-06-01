@@ -36,14 +36,14 @@ class AtomEmbedding(nn.Module):
             self.embeddings.weight, a=-np.sqrt(3), b=np.sqrt(3)
         )
 
-    def forward(self, Z):
+    def forward(self, x):
         """
         Returns
         -------
             h: torch.Tensor, shape=(nAtoms, emb_size)
                 Atom embeddings.
         """
-        h = self.embeddings(Z - 1)  # -1 because Z.min()=1 (==Hydrogen)
+        h = self.embeddings(x)
         return h
     
 

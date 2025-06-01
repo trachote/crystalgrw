@@ -1,5 +1,13 @@
 # CrystalGRW: Generative Modeling of Crystal Structures with Targeted Properties via Geodesic Random Walks
 [![arXiv](https://img.shields.io/badge/arXiv-2501.08998-blue)](https://arxiv.org/abs/2501.08998)
+
+### Version
+
+Current version: **1.1.0**
+
+See the [CHANGELOG.md](./CHANGELOG.md) for details on updates.
+
+
 ### Training scheme for CrystalGRW
 <p align="center">
 <img align="middle" src="./assets/crystalgrw_training.png" alt="Training scheme for CrystalGRW." width="800" />
@@ -24,9 +32,11 @@ conda activate crystalgrw
 ### Training a Model
 To train a model, run the following command:
 ```bash
-python scripts/train.py --config_path conf/mp_condition.yaml \
-                        --output_path output_dir
+python scripts/train.py --config_path conf/mp20_condition.yaml \
+                        --output_path output_dir \
+                        --ddp True
 ```
+The Distributed Data Parallel (DDP) option is set to `True` for multi-GPU training. This option is available for EquiformerV2 only. GemNet-dT does not support DDP training in the current version.
 
 ### Generating Crystal Structures
 To generate structures, run the following command:
@@ -64,8 +74,8 @@ python compute_metrics.py --root_path path/to/folder \
 ### Example Runs with MP-20 Dataset
 1. Unzip `data/mp_20.zip`.
 2. Update paths in `conf/*.yaml` files by replacing `path-to-folder/crystalgrw` with `pwd`.
-   - `conf/mp_example.yaml`: Configuration for training the model.
-   - `conf/mp_condition.yaml`: Configuration for training with controlled conditions.
+   - `conf/mp20_example.yaml`: Configuration for training the model.
+   - `conf/mp20_condition.yaml`: Configuration for training with controlled conditions.
 3. Train the model using the **Training a Model** command.
 
 ### Generate structures from pretrained models

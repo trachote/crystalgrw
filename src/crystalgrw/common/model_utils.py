@@ -1,7 +1,9 @@
 # from omegaconf import DictConfig, OmegaConf
+import os
+from torch.distributed import init_process_group
 
-from crystalgrw.models import models, sde, encoders, decoders, decode_stats
-from crystalgrw.models.encoders import controller
+from ..models import models, sde, encoders, decoders, decode_stats
+from ..models.encoders import controller
 
 
 def get_hparams(hparams):
@@ -77,6 +79,7 @@ def freeze_params(model, train="freeze"):
         else:
             break
 
+
 def get_external_module(cfg):
     import importlib.util
     import sys
@@ -86,3 +89,9 @@ def get_external_module(cfg):
     sys.modules[cfg.module_name] = module
     spec.loader.exec_module(module)
     return getattr(module, cfg._target_)(cfg)
+
+
+def ddp_setup(rank, world_size):
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)

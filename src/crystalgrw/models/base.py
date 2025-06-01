@@ -6,14 +6,16 @@ import copy
 import json
 import os
 import glob
+import sys
 from omegaconf import DictConfig, OmegaConf
 
 import torch
 from torch import sqrt
 import torch.nn as nn
 from torch.nn import functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.distributed as dist
 from torch_scatter import scatter
-import sys
 
 from ..common.datamodule import CrystDataModule
 from ..common.data_utils import (
@@ -21,12 +23,165 @@ from ..common.data_utils import (
     frac_to_cart_coords, min_distance_sqr_pbc)
 
 
+# from ..common.model_utils import get_model
+
+
 class BaseModel(nn.Module):
     def __init__(self, cfg) -> None:
         super().__init__()
         self.cfg = cfg
         self.hparams = cfg.model
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.hparams.data = cfg.data
+
+    def kld_reparam(self, hidden):
+        """
+        Reparameterization trick to sample from N(mu, var) from
+        N(0,1).
+        :param mu: (Tensor) Mean of the latent Gaussian [B x D]
+        :param logvar: (Tensor) Standard deviation of the latent Gaussian [B x D]
+        :return: (Tensor) [B x D]
+        """
+        mu = self.fc_mu(hidden)
+        log_var = self.fc_var(hidden)
+        std = torch.exp(0.5 * log_var)
+        eps = torch.randn_like(std)
+        z = eps * std + mu
+        return mu, log_var, z
+
+    def gaussian_kld(self, q_mu, q_logvar, p_mu, p_logvar, batch_idx, is_logvar=False, reduce="sum"):
+        """
+        KLD(q || p)
+        """
+        if not is_logvar:
+            q_logvar = 2 * torch.log(q_logvar)
+            p_logvar = 2 * torch.log(p_logvar)
+        kld = 0.5 * (p_logvar - q_logvar - 1 \
+                     + (torch.exp(q_logvar) + (q_mu - p_mu) ** 2) / torch.exp(p_logvar))
+        #         kld = torch.log(p_sigma / q_sigma) \
+        #               + 0.5 * (q_sigma**2 + (q_mu - p_mu)**2) / (p_sigma**2) \
+        #               - 0.5
+        return scatter(kld, batch_idx, dim=0, reduce=reduce)
+
+    def generate_rand_init(self, pred_composition_per_atom, pred_lengths,
+                           pred_angles, num_atoms, batch):
+        rand_frac_coords = torch.rand(num_atoms.sum(), 3,
+                                      device=num_atoms.device)
+        pred_composition_per_atom = F.softmax(pred_composition_per_atom,
+                                              dim=-1)
+        rand_atom_types = self.sample_composition(
+            pred_composition_per_atom, num_atoms)
+        return rand_frac_coords, rand_atom_types
+
+    def l2_loss(self, output, target, batch_idx=None, norm=False):
+        if norm:
+            factor = target.shape[-1]
+        else:
+            factor = 1.
+
+        loss = torch.sum((output - target) ** 2 / factor, dim=1)
+        if batch_idx is not None:
+            loss = scatter(loss, batch_idx, reduce="mean").mean()
+        else:
+            loss = loss.mean()
+        return loss
+
+    def num_atom_loss(self, pred_num_atoms, num_atoms):
+        return F.cross_entropy(pred_num_atoms, num_atoms)
+
+    def lattice_loss(self, pred_lengths_and_angles, batch):
+        self.lattice_scaler.match_device(pred_lengths_and_angles)
+        if self.hparams.data.lattice_scale_method == "scale_length":
+            target_lengths = batch.lengths / \
+                             batch.num_atoms.view(-1, 1).float() ** (1 / 3)
+        target_lengths_and_angles = torch.cat(
+            [target_lengths, batch.angles], dim=-1)
+        target_lengths_and_angles = self.lattice_scaler.transform(
+            target_lengths_and_angles)
+        return F.mse_loss(pred_lengths_and_angles, target_lengths_and_angles)
+
+    def composition_loss(self, pred_composition_per_atom, target_atom_types, batch_idx):
+        target_atom_types = target_atom_types - 1
+        loss = F.cross_entropy(pred_composition_per_atom,
+                               target_atom_types, reduction="none")
+        return scatter(loss, batch_idx, reduce="mean").mean()
+
+    def coord_loss(self, pred_coord_diff, noisy_coords,
+                   alpha_t, beta_t, batch, loss_type="coord"):
+        alpha_t, beta_t = alpha_t.unsqueeze(-1), beta_t.unsqueeze(-1)
+        noisy_coords = frac_to_cart_coords(noisy_coords, batch.lengths,
+                                           batch.angles, batch.num_atoms)
+        noisy_coords = self.add_mean(noisy_coords, recenter=self.recenter)
+        target_coords = frac_to_cart_coords(batch.frac_coords, batch.lengths, batch.angles, batch.num_atoms)
+        _, target_coord_diff = min_distance_sqr_pbc(target_coords, noisy_coords,
+                                                    batch.lengths, batch.angles,
+                                                    batch.num_atoms, noisy_coords.device,
+                                                    return_vector=True)
+        target_coord_diff = (target_coord_diff - (sqrt(alpha_t) - 1) * target_coords)
+        target_coord_diff = self.coords(target_coord_diff, batch, input_type="cart")
+
+        loss_per_atom = torch.sum(
+            (target_coord_diff - pred_coord_diff) ** 2, dim=1)
+        return scatter(loss_per_atom, batch.batch, reduce="mean").mean()
+
+    def type_loss(self, pred_atom_types, target_atom_types,
+                  batch_idx):
+        target_atom_types = target_atom_types - 1
+        loss = F.cross_entropy(
+            pred_atom_types, target_atom_types, reduction="none")
+        # rescale loss according to noise
+        loss = loss
+        return scatter(loss, batch_idx, reduce="mean").mean()
+
+    def kld_loss(self, mu, log_var):
+        kld_loss = torch.mean(
+            -0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim=1), dim=0)
+        return kld_loss
+
+    def get_condition(self, labels, num_atoms):
+        if self.control_fn is not None:
+            uncond_prob = torch.zeros(labels.size(0)).to(num_atoms.device) + self.uncond_prob
+            cond_mask = torch.bernoulli(1. - uncond_prob).bool().to(num_atoms.device).repeat_interleave(num_atoms)
+            condition = torch.zeros(num_atoms.sum(0), self.cfg.controller.hidden_dim).to(num_atoms.device)
+            condition[cond_mask] = self.control_fn(labels, num_atoms)[cond_mask]
+            return condition
+        else:
+            return None
+
+    def control_score(self, labels, natoms, guidance_strength, **kwargs):
+        if self.control_fn is None:
+            raise NotImplementedError(
+                "This model has not been trained "
+                "with a control function.")
+
+        if not isinstance(labels, torch.Tensor):
+            labels = torch.tensor([labels] * natoms.size(0),
+                                  device=natoms.device).view(natoms.size(0), -1)
+        else:
+            labels = labels.view(natoms.size(0), -1)
+
+        condition = self.control_fn(labels, natoms)
+        uncondition = torch.zeros_like(condition)
+
+        cond_scores = self.score_fn(cond_feat=condition,
+                                    natoms=natoms,
+                                    **kwargs)
+        uncond_scores = self.score_fn(cond_feat=uncondition,
+                                      natoms=natoms,
+                                      **kwargs)
+
+        scores = {}
+        for f in uncond_scores:
+            scores[f] = ((1 + guidance_strength) * cond_scores[f]
+                         - guidance_strength * uncond_scores[f])
+        return scores
+
+
+class Trainer:
+    def __init__(self, model, rank, world_size, cfg, training=True, load_data=True) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.hparams = cfg.model
+        self.device = rank
         self.hparams.data = cfg.data
         self.current_epoch = 0
         self.logs = {"train": [], "val": [], "test": []}
@@ -37,32 +192,45 @@ class BaseModel(nn.Module):
         self.train_log = None
         self.val_log = None
         self.test_log = None
-        self.model_name = "model"
         self.datamodule = None
+        self.train_dataloader = None
+        self.val_dataloader = None
+        self.test_dataloader = None
+        self.train_sampler = None
+        self.val_sampler = None
+        self.test_sampler = None
+
+        self.run_ddp = (rank != "cpu") and cfg.ddp
+        self.model = model.to(self.device)
+        self.model_name = self.model.model_name
+        self.init(training, load_data)
+        if self.run_ddp:
+            self.model = DDP(self.model, device_ids=[rank])
+
+        if not training:
+            self.model.eval()
 
     def init(self, training=True, load_data=True):
-        self.to(self.device)
-
         if training:
-            load_data = True
+            # load_data = True
             self.init_optimizer()
             self.init_scheduler()
 
-        # continue train, load = True else load = False
-        checkpoint = self.load_checkpoint(load_data)
+        checkpoint = self.load_checkpoint(training)
 
-        if checkpoint == False:
+        if not checkpoint:
             print("No checkpoint: Save hparams.yaml")
             with open(self.cfg.output_dir + "/hparams.yaml", "w") as f:
                 f.write(OmegaConf.to_yaml(cfg=self.cfg))
 
-        self.init_datamodule(training, load_data)
-        self.init_dataloader(training)
+        if load_data:
+            self.init_datamodule()
+            self.init_dataloader(training)
 
     def init_optimizer(self):
         print(f"Instantiating Optimizer <{self.cfg.optim.optimizer._target_}>")
         # if self.cfg.optim.optimizer._target_=="AdamW":
-        self.optimizer = torch.optim.AdamW(self.parameters(),
+        self.optimizer = torch.optim.AdamW(self.model.parameters(),
                                            **{k: v for k, v in self.cfg.optim.optimizer.items() if k != "_target_"})
 
     def init_scheduler(self):
@@ -73,37 +241,27 @@ class BaseModel(nn.Module):
                                                                                        self.cfg.optim.lr_scheduler.items()
                                                                                        if k != "_target_"})
 
-    def init_datamodule(self, training, load_data):
-        if load_data:
-            # if self.cfg.data.datamodule._target_ == "CrystDataModule":
-            print(f"Set up datamodule")
-            self.datamodule = CrystDataModule(**{k: v for k, v in self.cfg.data.datamodule.items() if k != "_target_"},
-                                              dataset=self.cfg.data.datamodule._target_, training=training)
-
-        # if load != True:
-        #     print(">>> save scalers")
-        #     self.lattice_scaler = self.datamodule.lattice_scaler.copy()
-        #     if hasattr(self, "param_decoder"):
-        #         self.param_decoder.lattice_scaler = self.datamodule.lattice_scaler.copy()
-        #     self.scaler = self.datamodule.scaler.copy()
-        #     torch.save(self.datamodule.lattice_scaler, self.cfg.output_dir + "/lattice_scaler.pt")
-        #     torch.save(self.datamodule.scaler, self.cfg.output_dir + "/prop_scaler.pt")
-        #
-        # if load == True:
-        #     print(">>> Load scalers")
-        #     self.lattice_scaler = torch.load(self.cfg.output_dir + "/lattice_scaler.pt")
-        #     self.scaler = torch.load(self.cfg.output_dir + "/prop_scaler.pt")
+    def init_datamodule(self):
+        # if self.cfg.data.datamodule._target_ == "CrystDataModule":
+        print(f"Set up datamodule")
+        self.datamodule = CrystDataModule(**{k: v for k, v in self.cfg.data.datamodule.items() if k != "_target_"},
+                                          run_ddp=self.run_ddp,
+                                          dataset=self.cfg.data.datamodule._target_)
 
     def init_dataloader(self, training):
-        if self.datamodule is not None:
-            if not training:
-                self.datamodule.setup(training)
-                self.test_dataloader = self.datamodule.test_dataloader()[0]
-            else:
-                self.datamodule.setup(training)
-                self.train_dataloader = self.datamodule.train_dataloader()
-                self.val_dataloader = self.datamodule.val_dataloader()[0]
-                self.test_dataloader = None
+        assert self.datamodule is not None
+        self.datamodule.setup(training)
+        if not training:
+            self.test_dataloader, self.test_sampler = self.datamodule.test_dataloader()[0]
+        else:
+            self.train_dataloader, self.train_sampler = self.datamodule.train_dataloader()
+            self.val_dataloader, self.val_sampler = self.datamodule.val_dataloader()[0]
+
+    def main_process(self):
+        """
+        Check if the current process is the main process.
+        """
+        return dist.get_rank() == 0 if self.run_ddp else True
 
     def train_start(self):
         print(">>>TRAINING START<<<")
@@ -112,11 +270,14 @@ class BaseModel(nn.Module):
     def train_end(self, e):
         print(">>>TRAINING END<<<")
         self.logging(e)
-        self.train_checkpoint_path = self.save_checkpoint(model_checkpoint_path=self.train_checkpoint_path,
-                                                          suffix="train")
+        if self.main_process():
+            self.train_checkpoint_path = self.save_checkpoint(
+                model_checkpoint_path=self.train_checkpoint_path,
+                suffix="train"
+            )
 
     def clip_grad_value_(self):
-        torch.nn.utils.clip_grad_value_(self.parameters(), clip_value=0.5)
+        torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=0.5)
 
     def train_step_end(self, e):
         # for examination
@@ -161,8 +322,11 @@ class BaseModel(nn.Module):
         if self.val_log["val_loss"] < self.min_val_loss:
             self.min_val_loss = self.val_log["val_loss"]
             self.min_val_epoch = e
-            self.val_checkpoint_path = self.save_checkpoint(model_checkpoint_path=self.val_checkpoint_path,
-                                                            suffix="val")
+            if self.main_process():
+                self.val_checkpoint_path = self.save_checkpoint(
+                    model_checkpoint_path=self.val_checkpoint_path,
+                    suffix="val",
+                )
 
     def test_epoch_end(self):
         log_dict = {}
@@ -181,35 +345,44 @@ class BaseModel(nn.Module):
         if e % self.cfg.logging.log_freq_every_n_epoch == 0:
             self.logging(e)
 
-        if e % self.cfg.checkpoint_freq_every_n_epoch == 0:
-            self.train_checkpoint_path = self.save_checkpoint(model_checkpoint_path=self.train_checkpoint_path,
-                                                              suffix="train")
+        if (e % self.cfg.checkpoint_freq_every_n_epoch) and self.main_process():
+            self.train_checkpoint_path = self.save_checkpoint(
+                model_checkpoint_path=self.train_checkpoint_path,
+                suffix="train",
+            )
 
         self.current_epoch += 1
 
-    def load_checkpoint(self, load):
+    def load_checkpoint(self, training, load_val_for_train=False):
+        train_ckpts = list(glob.glob(f"{self.cfg.output_dir}/*={self.model_name}=train.ckpt"))
+        val_ckpts = list(glob.glob(f"{self.cfg.output_dir}/*={self.model_name}=val.ckpt"))
+        ckpts = train_ckpts + val_ckpts
+        print("All checkpoints:", ckpts)
         checkpoint = False
-        # ckpts = list(self.cfg.output_dir.glob(f"*={self.model_name}=*.ckpt"))
-        ckpts = list(glob.glob(f"{self.cfg.output_dir}/*={self.model_name}=*.ckpt"))
-        print(ckpts, f"{self.cfg.output_dir}/*={self.model_name}=*.ckpt")
+
+        if training and not load_val_for_train:
+            ckpts = train_ckpts + val_ckpts
+        elif len(val_ckpts) == 0:
+            print("No VAL checkpoints exist, use a TRAIN checkpoint instead.")
+            ckpts = train_ckpts
+        else:
+            ckpts = val_ckpts
+
         if len(ckpts) > 0:
+            ckpt_epochs = np.array([int(ck.split("/")[-1].split(".")[0].split("=")[1]) for ck in ckpts])
+            ckpt_path = str(ckpts[ckpt_epochs.argsort()[-1]])
 
-            ckpt_epochs = np.array([int(ckpt.split("/")[-1].split(".")[0].split("=")[1]) for ckpt in ckpts])
-            ckpt = str(ckpts[ckpt_epochs.argsort()[-1]])
-            print(f">>>>> Load model from checkpoint {ckpt}")
-
-            if torch.cuda.is_available():
-                ckpt = torch.load(ckpt)
-            else:
-                ckpt = torch.load(ckpt, map_location=torch.device("cpu"))
-
+            print(f">>>>> Load the model from a checkpoint: {ckpt_path}")
+            ckpt = torch.load(ckpt_path, map_location=torch.device(self.device))
             self.current_epoch = ckpt["epoch"] + 1
-
-            print(f">>>>> Update model from train checkpoint")
-            self.load_state_dict(ckpt["model_state_dict"])
+            self.model.load_state_dict(ckpt["model_state_dict"])
 
             try:
                 self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+                for state in self.optimizer.state.values():
+                    for k, v in state.items():
+                        if isinstance(v, torch.Tensor):
+                            state[k] = v.to(self.device)
             except:
                 print("ERROR: Loading state dict")
 
@@ -221,32 +394,22 @@ class BaseModel(nn.Module):
 
             self.train_checkpoint_path = f"{self.cfg.output_dir}/epoch={ckpt['epoch']}={self.model_name}=train.ckpt"
 
-            ckpts = list(glob.glob(f"{self.cfg.output_dir}/*={self.model_name}=val.ckpt"))
-            # list(self.cfg.output_dir.glob(f"*={self.model_name}=val.ckpt"))
+            if val_ckpts:
+                if ckpt_path.split("/")[-1].split("=")[-1][:-5] == "train":
+                    val_epochs = np.array([int(ck.split("/")[-1].split(".")[0].split("=")[1]) for ck in val_ckpts])
+                    val_path = str(val_ckpts[val_epochs.argsort()[-1]])
+                    print(f">>>>> Load the val model from a checkpoint: {val_path}")
+                    ckpt = torch.load(val_path, map_location=torch.device(self.device))
+            else:
+                print("No VAL checkpoints exist, set the last TRAIN checkpoint as the min val")
 
-            if len(ckpts) > 0:
+            self.min_val_epoch = ckpt["epoch"]
+            self.min_val_loss = torch.tensor(ckpt["val_loss"])
 
-                ckpt_epochs = np.array([int(ckpt.split("/")[-1].split(".")[0].split("=")[1]) for ckpt in ckpts])
-                ckpt = str(ckpts[ckpt_epochs.argsort()[-1]])
+            print("min val epoch: ", self.min_val_epoch)
+            print("min val loss: ", self.min_val_loss.item())
 
-                print(f">>>>> Load val model from checkpoint {ckpt}")
-
-                if torch.cuda.is_available():
-                    ckpt = torch.load(ckpt)
-                else:
-                    ckpt = torch.load(ckpt, map_location=torch.device("cpu"))
-
-                if load:
-                    print(f">>>>> Update model from val checkpoint")
-                    self.load_state_dict(ckpt["model_state_dict"])
-
-                self.min_val_epoch = ckpt["epoch"]
-                self.min_val_loss = torch.tensor(ckpt["val_loss"])
-
-                print("min val epoch: ", self.min_val_epoch)
-                print("min val loss: ", self.min_val_loss.item())
-
-                self.val_checkpoint_path = f"{self.cfg.output_dir}/epoch={ckpt['epoch']}={self.model_name}=val.ckpt"
+            self.val_checkpoint_path = f"{self.cfg.output_dir}/epoch={ckpt['epoch']}={self.model_name}=val.ckpt"
             checkpoint = True
         else:
             print(f">>>>> New Training")
@@ -255,7 +418,9 @@ class BaseModel(nn.Module):
 
     def save_checkpoint(self, model_checkpoint_path, suffix="val", logs={}):
         model_checkpoint = {
-            "model_state_dict": copy.deepcopy(self.state_dict()),
+            "model_state_dict":
+                copy.deepcopy(self.model.module.state_dict())
+                if self.run_ddp else copy.deepcopy(self.model.state_dict()),
             "optimizer_state_dict": copy.deepcopy(self.optimizer.state_dict()),
             "scheduler_state_dict": copy.deepcopy(self.scheduler.state_dict()),
             "epoch": self.current_epoch,
@@ -267,13 +432,23 @@ class BaseModel(nn.Module):
 
         new_model_checkpoint_path = f"{self.cfg.output_dir}/epoch={self.current_epoch}={self.model_name}={suffix}.ckpt"
 
-        if new_model_checkpoint_path != model_checkpoint_path:
-            if model_checkpoint_path and os.path.exists(model_checkpoint_path):
-                os.remove(model_checkpoint_path)
-            print("Save model checkpoint: ", new_model_checkpoint_path)
-            print("\tmodel checkpoint train loss: ", model_checkpoint["train_loss"])
-            print("\tmodel checkpoint val loss: ", model_checkpoint["val_loss"])
-            torch.save(model_checkpoint, new_model_checkpoint_path)
+        # if new_model_checkpoint_path != model_checkpoint_path:
+        #     if model_checkpoint_path and os.path.exists(model_checkpoint_path):
+        #         os.remove(model_checkpoint_path)
+        #     print("Save model checkpoint: ", new_model_checkpoint_path)
+        #     print("\tmodel checkpoint train loss: ", model_checkpoint["train_loss"])
+        #     print("\tmodel checkpoint val loss: ", model_checkpoint["val_loss"])
+        #     torch.save(model_checkpoint, new_model_checkpoint_path)
+
+        print("Save model checkpoint: ", new_model_checkpoint_path)
+        print("\tmodel checkpoint train loss: ", model_checkpoint["train_loss"])
+        print("\tmodel checkpoint val loss: ", model_checkpoint["val_loss"])
+        torch.save(model_checkpoint, new_model_checkpoint_path)
+
+        ckpts = list(glob.glob(f"{self.cfg.output_dir}/*={self.model_name}={suffix}.ckpt"))
+        for ckpt in ckpts:
+            if (new_model_checkpoint_path != ckpt) and os.path.exists(ckpt) and len(ckpts) > 1:
+                os.remove(ckpt)
 
         return new_model_checkpoint_path
 
@@ -285,7 +460,7 @@ class BaseModel(nn.Module):
         return False
 
     def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        outputs = self(batch, training=True)
+        outputs = self.model(batch.to(self.device), training=True)
         log_dict, loss = self.compute_stats(batch, outputs, prefix="train")
         self.log_dict(
             log_dict,
@@ -299,7 +474,7 @@ class BaseModel(nn.Module):
         return loss
 
     def validation_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        outputs = self(batch, training=False)
+        outputs = self.model(batch.to(self.device), training=False)
         log_dict, loss = self.compute_stats(batch, outputs, prefix="val")
         self.log_dict(
             log_dict,
@@ -311,13 +486,19 @@ class BaseModel(nn.Module):
         return loss
 
     def test_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        outputs = self(batch, training=False)
+        outputs = self.model(batch.to(self.device), training=False)
         log_dict, loss = self.compute_stats(batch, outputs, prefix="test")
         self.log_dict(
             log_dict,
             prefix="test"
         )
         return loss
+
+    def train(self):
+        self.model.train()
+
+    def eval(self):
+        self.model.eval()
 
     def compute_stats(self, batch, outputs, prefix):
         losses = outputs["losses"]
@@ -343,6 +524,10 @@ class BaseModel(nn.Module):
 
             if "pred_atom_types" in outputs.keys():
                 if outputs["pred_atom_types"] is not None:
+                    if batch.batch is None:
+                        batch.batch = torch.arange(
+                            batch.num_graphs, device=batch.num_atoms.device
+                        ).repeat_interleave(batch.num_atoms)
                     # evaluate atom type prediction.
                     pred_atom_types = outputs["pred_atom_types"]
                     target_atom_types = outputs["target_atom_types"]
@@ -355,7 +540,7 @@ class BaseModel(nn.Module):
         return log_dict, loss
 
     def logging(self, e):
-        print(f"Epoch {e:5d}:")
+        print(f"Epoch {e:5d} [GPU{self.device}]:")
         print(f"\tTrain Loss:{self.train_log['train_loss']}")
         if self.val_log:
             print(f"\tVal Loss:{self.val_log['val_loss']}")
@@ -369,235 +554,3 @@ class BaseModel(nn.Module):
             self.logs[x] = []
         self.train_log = []
         self.val_log = []
-
-    def kld_reparam(self, hidden):
-        """
-        Reparameterization trick to sample from N(mu, var) from
-        N(0,1).
-        :param mu: (Tensor) Mean of the latent Gaussian [B x D]
-        :param logvar: (Tensor) Standard deviation of the latent Gaussian [B x D]
-        :return: (Tensor) [B x D]
-        """
-        mu = self.fc_mu(hidden)
-        log_var = self.fc_var(hidden)
-        std = torch.exp(0.5 * log_var)
-        eps = torch.randn_like(std)
-        z = eps * std + mu
-        return mu, log_var, z
-
-    def gaussian_kld(self, q_mu, q_logvar, p_mu, p_logvar, batch_idx, is_logvar=False, reduce="sum"):
-        """
-        KLD(q || p)
-        """
-        if not is_logvar:
-            q_logvar = 2 * torch.log(q_logvar)
-            p_logvar = 2 * torch.log(p_logvar)
-        kld = 0.5 * (p_logvar - q_logvar - 1 \
-                     + (torch.exp(q_logvar) + (q_mu - p_mu) ** 2) / torch.exp(p_logvar))
-        #         kld = torch.log(p_sigma / q_sigma) \
-        #               + 0.5 * (q_sigma**2 + (q_mu - p_mu)**2) / (p_sigma**2) \
-        #               - 0.5
-        return scatter(kld, batch_idx, dim=0, reduce=reduce)
-
-    def sub_mean(self, x, batch_idx, num_atoms, dim=0, recenter=True):
-        if recenter:
-            self.mean = scatter(x, batch_idx, dim=dim, reduce="mean")
-            self.mean = self.mean.repeat_interleave(num_atoms, dim=0)
-            x = x - self.mean
-        else:
-            self.mean = 0.
-        return x
-
-    def add_mean(self, x, recenter=True):
-        if recenter:
-            x = x + self.mean
-        return x
-
-    def shortest_side(self, x):
-        neg = x < 0.
-        dcm = x % ((-1) ** neg)
-        p = (-1) ** (dcm < (0.5 * (-1) ** neg))
-        x_fold = p * torch.div(x, (-1) ** neg, rounding_mode="floor") + dcm
-        return x_fold
-
-    def generate_rand_init(self, pred_composition_per_atom, pred_lengths,
-                           pred_angles, num_atoms, batch):
-        rand_frac_coords = torch.rand(num_atoms.sum(), 3,
-                                      device=num_atoms.device)
-        pred_composition_per_atom = F.softmax(pred_composition_per_atom,
-                                              dim=-1)
-        rand_atom_types = self.sample_composition(
-            pred_composition_per_atom, num_atoms)
-        return rand_frac_coords, rand_atom_types
-
-    def sample_composition(self, composition_prob, num_atoms):
-        """
-        Samples composition such that it exactly satisfies composition_prob
-        """
-        batch = torch.arange(
-            len(num_atoms), device=num_atoms.device).repeat_interleave(num_atoms)
-        assert composition_prob.size(0) == num_atoms.sum() == batch.size(0)
-        composition_prob = scatter(
-            composition_prob, index=batch, dim=0, reduce="mean")
-
-        all_sampled_comp = []
-
-        for comp_prob, num_atom in zip(list(composition_prob), list(num_atoms)):
-            comp_num = torch.round(comp_prob * num_atom)
-            atom_type = torch.nonzero(comp_num, as_tuple=True)[0] + 1
-            atom_num = comp_num[atom_type - 1].long()
-
-            sampled_comp = atom_type.repeat_interleave(atom_num, dim=0)
-
-            # if the rounded composition gives less atoms, sample the rest
-            if sampled_comp.size(0) < num_atom:
-                left_atom_num = num_atom - sampled_comp.size(0)
-
-                left_comp_prob = comp_prob - comp_num.float() / num_atom
-
-                left_comp_prob[left_comp_prob < 0.] = 0.
-                left_comp = torch.multinomial(
-                    left_comp_prob, num_samples=left_atom_num, replacement=True)
-                # convert to atomic number
-                left_comp = left_comp + 1
-                sampled_comp = torch.cat([sampled_comp, left_comp], dim=0)
-
-            sampled_comp = sampled_comp[torch.randperm(sampled_comp.size(0))]
-            sampled_comp = sampled_comp[:num_atom]
-            all_sampled_comp.append(sampled_comp)
-
-        all_sampled_comp = torch.cat(all_sampled_comp, dim=0)
-        assert all_sampled_comp.size(0) == num_atoms.sum()
-        return all_sampled_comp
-
-    def predict_num_atoms(self, z):
-        return self.fc_num_atoms(z)
-
-    def predict_property(self, z):
-        self.scaler.match_device(z)
-        return self.scaler.inverse_transform(self.fc_property(z))
-
-    def predict_property_class(self, z):
-        return torch.stack([self.fc_property_class[i](z) for i in range(self.len_prop_classes)], -1)
-
-    def predict_lattice(self, z, num_atoms):
-        self.lattice_scaler.match_device(z)
-        pred_lengths_and_angles = self.fc_lattice(z)  # (N, 6)
-        scaled_preds = self.lattice_scaler.inverse_transform(
-            pred_lengths_and_angles)
-        pred_lengths = scaled_preds[:, :3]
-        pred_angles = scaled_preds[:, 3:]
-        if self.hparams.data.lattice_scale_method == "scale_length":
-            pred_lengths = pred_lengths * num_atoms.view(-1, 1).float() ** (1 / 3)
-        # <pred_lengths_and_angles> is scaled.
-        return pred_lengths_and_angles, pred_lengths, pred_angles
-
-    def predict_composition(self, z, num_atoms):
-        z_per_atom = z.repeat_interleave(num_atoms, dim=0)
-        pred_composition_per_atom = self.fc_composition(z_per_atom)
-        return pred_composition_per_atom
-
-    def l2_loss(self, output, target, batch_idx=None, norm=False):
-        if norm:
-            factor = target.shape[-1]
-        else:
-            factor = 1.
-
-        loss = torch.sum((output - target) ** 2 / factor, dim=1)
-        if batch_idx is not None:
-            loss = scatter(loss, batch_idx, reduce="mean").mean()
-        else:
-            loss = loss.mean()
-        return loss
-
-    def num_atom_loss(self, pred_num_atoms, num_atoms):
-        return F.cross_entropy(pred_num_atoms, num_atoms)
-
-    def lattice_loss(self, pred_lengths_and_angles, batch):
-        self.lattice_scaler.match_device(pred_lengths_and_angles)
-        if self.hparams.data.lattice_scale_method == "scale_length":
-            target_lengths = batch.lengths / \
-                             batch.num_atoms.view(-1, 1).float() ** (1 / 3)
-        target_lengths_and_angles = torch.cat(
-            [target_lengths, batch.angles], dim=-1)
-        target_lengths_and_angles = self.lattice_scaler.transform(
-            target_lengths_and_angles)
-        return F.mse_loss(pred_lengths_and_angles, target_lengths_and_angles)
-
-    def composition_loss(self, pred_composition_per_atom, target_atom_types, batch_idx):
-        target_atom_types = target_atom_types - 1
-        loss = F.cross_entropy(pred_composition_per_atom,
-                               target_atom_types, reduction="none")
-        return scatter(loss, batch_idx, reduce="mean").mean()
-
-    def coord_loss(self, pred_coord_diff, noisy_coords,
-                   alpha_t, beta_t, batch, loss_type="coord"):
-        alpha_t, beta_t = alpha_t.unsqueeze(-1), beta_t.unsqueeze(-1)
-        noisy_coords = frac_to_cart_coords(noisy_coords, batch.lengths,
-                                           batch.angles, batch.num_atoms)
-        noisy_coords = self.add_mean(noisy_coords, recenter=self.recenter)
-        target_coords = frac_to_cart_coords(batch.frac_coords, batch.lengths, batch.angles, batch.num_atoms)
-        _, target_coord_diff = min_distance_sqr_pbc(target_coords, noisy_coords,
-                                                    batch.lengths, batch.angles,
-                                                    batch.num_atoms, self.device,
-                                                    return_vector=True)
-        target_coord_diff = (target_coord_diff - (sqrt(alpha_t) - 1) * target_coords)
-        target_coord_diff = self.coords(target_coord_diff, batch, input_type="cart")
-
-        loss_per_atom = torch.sum(
-            (target_coord_diff - pred_coord_diff) ** 2, dim=1)
-        return scatter(loss_per_atom, batch.batch, reduce="mean").mean()
-
-    def type_loss(self, pred_atom_types, target_atom_types,
-                  batch_idx):
-        target_atom_types = target_atom_types - 1
-        loss = F.cross_entropy(
-            pred_atom_types, target_atom_types, reduction="none")
-        # rescale loss according to noise
-        loss = loss
-        return scatter(loss, batch_idx, reduce="mean").mean()
-
-    def kld_loss(self, mu, log_var):
-        kld_loss = torch.mean(
-            -0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim=1), dim=0)
-        return kld_loss
-
-    def sample(self, num_samples, ld_kwargs):
-        z = torch.randn(num_samples, self.hparams.hidden_dim,
-                        device=self.device)
-        samples = self.langevin_dynamics(z, ld_kwargs)
-        return samples
-
-    def get_condition(self, labels, num_atoms):
-        if self.control_fn is not None:
-            uncond_prob = torch.zeros(labels.size(0)).to(self.device) + self.uncond_prob
-            cond_mask = torch.bernoulli(1. - uncond_prob).bool().to(self.device).repeat_interleave(num_atoms)
-            condition = torch.zeros(num_atoms.sum(0), self.cfg.controller.hidden_dim).to(self.device)
-            condition[cond_mask] = self.control_fn(labels, num_atoms)[cond_mask]
-            return condition
-        else:
-            return None
-
-    def control_score(self, labels, natoms, guidance_strength, **kwargs):
-        if self.control_fn is None:
-            raise NotImplementedError(
-                    "This model has not been trained "
-                    "with a control function.")
-
-        labels = torch.tensor([labels]*natoms.size(0),
-                              device=natoms.device).view(natoms.size(0),-1)
-        condition = self.control_fn(labels, natoms)
-        uncondition = torch.zeros_like(condition)
-        
-        cond_scores = self.score_fn(cond_feat=condition,
-                                    natoms=natoms,
-                                    **kwargs)
-        uncond_scores = self.score_fn(cond_feat=uncondition,
-                                      natoms=natoms,
-                                      **kwargs)
-
-        scores = {}
-        for f in uncond_scores:
-            scores[f] = ((1+guidance_strength) * cond_scores[f]
-                         - guidance_strength * uncond_scores[f])
-        return scores

@@ -1,13 +1,13 @@
-expname: mp_20
+expname: alex_mp_20
 
 PROJECT_ROOT: path-to-folder/crystalgrw
 
 core:
-  version: 0.0.1
+  version: 1.0.2
   tags:
     - ${now:%Y-%m-%d}
 
-data: mp
+data: alex_mp_20
 
 checkpoint_freq_every_n_epoch: 5
 
@@ -32,9 +32,9 @@ model:
   hidden_dim: 128
   latent_dim: 0
   max_atoms: ${data.max_atoms}
-  cost_frac_coords: 1.
-  cost_atomic_types: 1.
-  cost_lattices: 1.
+  cost_coord: 1.
+  cost_type: 1.
+  cost_lattice: 1.
   cost_kld: 1.
   max_neighbors: 12
   radius: 12.
@@ -56,12 +56,12 @@ model:
 
 sde:
      _target_: GRW
-     b0_coord: 1e-4
-     bf_coord: 1
-     b0_lattice: 1e-3
-     bf_lattice: 20.
-     b0_type: 1e-6
-     bf_type: 5.
+     b0_t3: 1e-4
+     bf_t3: 1
+     b0_r3: 1e-3
+     bf_r3: 20.
+     b0_hpc: 1e-6
+     bf_hpc: 5.
      max_time: ${model.num_noise_level}
      timesteps: 1
      corrupt_coords: ${model.corrupt_coords}

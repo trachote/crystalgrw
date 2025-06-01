@@ -50,7 +50,12 @@ class CrystalGRW(BaseModel):
                                     self.hparams.latent_dim)
 
     def forward(self, batch, *args, **kwargs):
-        batch_idx = batch.batch
+        if batch.batch is None:
+            batch_idx = torch.arange(
+                batch.num_graphs, device=batch.num_atoms.device
+            ).repeat_interleave(batch.num_atoms)
+        else:
+            batch_idx = batch.batch
         atom_types = batch.atom_types
         natoms = batch.num_atoms
         frac_coords = batch.frac_coords
@@ -137,66 +142,3 @@ class CrystalGRW(BaseModel):
             "pred_atom_types": scores["atom_types"] if "atom_types" in scores else None,
             "target_atom_types": atom_types,
         }
-
-    @torch.no_grad()
-    def sample(self, frac_coords, lattices, atom_types, natoms, ld_kwargs,
-               z=None, labels=None, guidance_strength=1, input_encoder=None):
-
-        if self.encoder is not None:
-            assert input_encoder is not None
-            z = self.encoder(input_encoder)
-            if self.vae:
-                _, _, z = self.kld_reparam(z)
-
-        x_T = {"frac_coords": frac_coords, "lattices": lattices, "atom_types": atom_types}
-        data = {"natoms": natoms, "z": z}
-
-        if labels is None:
-            score_fn = partial(self.score_fn, **data)
-            desc = "Sampling"
-        else:
-            score_fn = partial(self.control_score,
-                               labels=labels,
-                               guidance_strength=guidance_strength,
-                               **data,
-                               )
-            desc = f"Condition-guided sampling [{labels}]"
-
-        T = torch.ones((natoms.size(0),)).to(self.device)
-        progress_bar = tqdm(total=self.T, desc=desc)
-
-        x_all, _ = self.sde_fn(x_T, T,
-                               natoms,
-                               N=self.T,
-                               score_fn=score_fn,
-                               stack_data=ld_kwargs.save_traj,
-                               adaptive_timestep=ld_kwargs.adaptive_timestep,
-                               progress_bar=progress_bar)
-
-        x = x_all[-1] if ld_kwargs.save_traj else x_all
-        lengths, angles = lattice_params_from_matrix(
-            x["lattices"].view(-1, 3, 3))
-        # atom_types = torch.multinomial(
-        #     x["atom_types"], num_samples=1).squeeze(1) + 1
-
-        output_dict = {"num_atoms": natoms,
-                       "lengths": lengths,
-                       "angles": angles,
-                       "frac_coords": x["frac_coords"],
-                       "atom_types": x["atom_types"],
-                       "is_traj": False}
-
-        if ld_kwargs.save_traj:
-            coords, atoms, lats = [], [], []
-            for x in x_all:
-                coords.append(x["frac_coords"])
-                atoms.append(x["atom_types"])
-                lats.append(torch.cat(lattice_params_from_matrix(
-                    x["lattices"].view(-1, 3, 3)), dim=-1))
-            output_dict.update(dict(
-                traj_frac_coords=torch.stack(coords, dim=1),
-                traj_atom_types=torch.stack(atoms, dim=1),
-                traj_lattices=torch.stack(lats, dim=1),
-                is_traj=True))
-
-        return output_dict

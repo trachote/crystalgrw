@@ -1,17 +1,15 @@
 import random
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple, Any, List
 from pathlib import Path
 
-#import hydra
 import numpy as np
-import omegaconf
-# import pytorch_lightning as pl
-import torch
 from omegaconf import DictConfig
-from torch.utils.data import Dataset
-from torch_geometric.loader import DataLoader
 
-# from cdvae.common.utils import PROJECT_ROOT
+import torch
+from torch.utils.data import Dataset, DistributedSampler
+from torch.utils.data.distributed import DistributedSampler
+from torch_geometric.loader import DataLoader, DataListLoader
+
 from .data_utils import get_scaler_from_data_list
 from . import dataset as get_dataset
 
@@ -42,12 +40,14 @@ class CrystDataModule:
         dataset: str,
         scaler_path=None,
         training=True,
+        run_ddp=False,
     ):
         super().__init__()
         self.datasets = datasets
         self.num_workers = num_workers
         self.batch_size = batch_size
         self.dataset = getattr(get_dataset, dataset)
+        self.run_ddp = run_ddp
 
         self.train_dataset: Optional[Dataset] = None
         self.val_datasets: Optional[Sequence[Dataset]] = None
@@ -104,37 +104,50 @@ class CrystDataModule:
             #     test_dataset.lattice_scaler = self.scaler
             #     test_dataset.scaler = self.scaler
 
-    def train_dataloader(self) -> DataLoader:
+    def train_dataloader(self) -> tuple[DataLoader, DistributedSampler[Any]]:
+        sampler = DistributedSampler(self.train_dataset) if self.run_ddp else None
+        shuffle = True if not self.run_ddp else False
         return DataLoader(
             self.train_dataset,
-            shuffle=True,
+            shuffle=shuffle,
             batch_size=self.batch_size.train,
+            sampler=sampler,
             num_workers=self.num_workers.train,
             worker_init_fn=worker_init_fn,
-        )
+        ), sampler
 
-    def val_dataloader(self) -> Sequence[DataLoader]:
+    def val_dataloader(self) -> list[tuple[DataLoader, Any]]:
+        samplers = [
+            DistributedSampler(dataset, shuffle=False)
+            if self.run_ddp else None for dataset in self.val_datasets
+        ]
         return [
-            DataLoader(
+            (DataLoader(
                 dataset,
-                shuffle=False,
+                # shuffle=False,
                 batch_size=self.batch_size.val,
+                sampler=sampler,
                 num_workers=self.num_workers.val,
                 worker_init_fn=worker_init_fn,
-            )
-            for dataset in self.val_datasets
+            ), sampler)
+            for dataset, sampler in zip(self.val_datasets, samplers)
         ]
 
-    def test_dataloader(self) -> Sequence[DataLoader]:
+    def test_dataloader(self) -> list[tuple[DataLoader, Any]]:
+        samplers = [
+            DistributedSampler(dataset, shuffle=False)
+            if self.run_ddp else None for dataset in self.test_datasets
+        ]
         return [
-            DataLoader(
+            (DataLoader(
                 dataset,
-                shuffle=False,
+                # shuffle=False,
                 batch_size=self.batch_size.test,
+                sampler=DistributedSampler(dataset, shuffle=False),
                 num_workers=self.num_workers.test,
                 worker_init_fn=worker_init_fn,
-            )
-            for dataset in self.test_datasets
+            ), sampler)
+            for dataset, sampler in zip(self.test_datasets, samplers)
         ]
 
     def __repr__(self) -> str:
@@ -145,16 +158,3 @@ class CrystDataModule:
             f"{self.batch_size=})"
         )
 
-
-# @hydra.main(config_path=str(PROJECT_ROOT / "conf"), config_name="default")
-# def main(cfg: omegaconf.DictConfig):
-#     datamodule: pl.LightningDataModule = hydra.utils.instantiate(
-#         cfg.data.datamodule, _recursive_=False
-#     )
-#     datamodule.setup('fit')
-#     import pdb
-#     pdb.set_trace()
-
-
-# if __name__ == "__main__":
-#     main()

@@ -140,7 +140,10 @@ class BaseDecoder(nn.Module):
 
     def key_map(self, outs):
         for k in list(outs.keys()):
-            outs[self.keys[k]] = outs.pop(k)
+            if k in self.keys:
+                outs[self.keys[k]] = outs.pop(k)
+            else:
+                outs.pop(k)
         return outs
 
     def forward(self, t, frac_coords, atom_types, natoms, lattices=None,
@@ -172,9 +175,11 @@ class BaseDecoder(nn.Module):
             batch=batch,
         )
 
+        outs = self.key_map(outs)
+
         if self.regress_atoms:
-            outs["atoms"] = torch.softmax(outs["atoms"], dim=1)
-        return self.key_map(outs)
+            outs["atom_types"] = torch.softmax(outs["atom_types"], dim=1)
+        return outs
 
 
 class GemNetTDecoder(BaseDecoder):

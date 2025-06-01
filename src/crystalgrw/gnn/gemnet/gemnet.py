@@ -441,7 +441,7 @@ class GemNetT(torch.nn.Module):
 
         if self.otf_graph:
             edge_index, to_jimages, nbonds = radius_graph_pbc(
-                cart_coords, lengths, angles, natoms, self.cutoff, self.max_neighbors,
+                cart_coords, (lengths, angles), natoms, self.cutoff, self.max_neighbors,
                 device=natoms.device)
 
         # Switch the indices, so the second one becomes the target index,
@@ -520,7 +520,7 @@ class GemNetT(torch.nn.Module):
             id3_ragged_idx,
         )
 
-    def forward(self, pos, atom_types, natoms, lengths,
+    def forward(self, pos, atomic_numbers, natoms, lengths,
                 angles, edge_index, to_jimages, nbonds,
                 node_feats=None, batch=None):
         """
@@ -537,8 +537,6 @@ class GemNetT(torch.nn.Module):
         """
         if self.frac_to_cart:
             pos = frac_to_cart_coords(pos, lengths, angles, natoms)
-
-        atomic_numbers = atom_types
 
         (
             edge_index,
@@ -618,7 +616,7 @@ class GemNetT(torch.nn.Module):
             E_t, batch, dim=0, dim_size=nMolecules, reduce="mean"
         )  # (nMolecules, num_targets)
         
-        if not self.regress_atoms:
+        if self.regress_atoms:
             outs["atoms"] = A_t
 
         if self.regress_lattices:

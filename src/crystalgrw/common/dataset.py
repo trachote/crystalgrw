@@ -144,7 +144,7 @@ class CrystDataset(Dataset):
             data["y"] = prop.view(1, -1).to(DTYPE)
 
         data = Data(**data)
-        data.num_nodes = data["num_atoms"].item()
+        # data.num_nodes = data.num_atoms
         return data
 
     def __repr__(self) -> str:

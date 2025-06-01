@@ -15,6 +15,7 @@ from pymatgen.core.structure import Structure
 from pymatgen.core.composition import Composition
 from pymatgen.core.lattice import Lattice
 from pymatgen.analysis.structure_matcher import StructureMatcher
+from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 from matminer.featurizers.site.fingerprint import CrystalNNFingerprint
 from matminer.featurizers.composition.composite import ElementProperty
 
@@ -186,13 +187,16 @@ class GenEval(object):
 
     def __init__(self, gen_crys, db_crys, n_samples=1000, eval_model_name=None,
                  ltol=0.2, stol=0.3, angle_tol=5, primitive_cell=True, scale=True,
-                 attempt_supercell=True, allow_subset=False, unique_algo=1, unique_sym=True):
+                 attempt_supercell=True, allow_subset=False, unique_algo=1, unique_sym=True,
+                 compute_unn_pg=True, save_unn_indices=False):
         self.gen_crys = gen_crys
         self.db_crys = db_crys
         self.n_samples = n_samples
         self.eval_model_name = eval_model_name
         self.unique_algo = unique_algo
         self.unique_sym = unique_sym
+        self.compute_unn_pg = compute_unn_pg
+        self.save_unn_indices = save_unn_indices
         self.unique_idx = None
         self.novel_idx = None
 
@@ -332,8 +336,36 @@ class GenEval(object):
     def get_unique_and_novel(self):
         assert self.unique_idx is not None
         assert self.novel_idx is not None
-        unn = [i for i in self.unique_idx if i in self.novel_idx]
-        return {"unique_and_novel": len(unn) / len(self.gen_crys)}
+        self.unn_idx = [i for i in self.unique_idx if i in self.novel_idx]
+        return {"unique_and_novel": len(self.unn_idx) / len(self.gen_crys)}
+
+    def get_unique_and_novel_by_point_group(self):
+        assert self.unique_idx is not None
+        assert self.novel_idx is not None
+        assert self.unn_idx is not None
+
+        pgs = []
+        for i, crys in enumerate(tqdm(self.gen_crys, desc="Evaluating unqiue&novel by point group")):
+            if crys.constructed:
+                pgs.append(SpacegroupAnalyzer(crys.structure).get_point_group_symbol())
+            else:
+                pgs.append('not-constructed')
+
+        all_pgs = Counter(pgs)
+
+        def get_ratio(indices):
+            counter = Counter([pg for i, pg in enumerate(pgs) if i in indices])
+            return {pg: count / all_pgs[pg] for pg, count in counter.items()}
+
+        unqiue_pgs = get_ratio(self.unique_idx)
+        novel_pgs = get_ratio(self.novel_idx)
+        unn_pgs = get_ratio(self.unn_idx)
+
+        return {
+            "unique_pgs": unqiue_pgs,
+            "novel_pgs": novel_pgs,
+            "unique_and_novel_pgs": unn_pgs,
+        }
 
     def get_metrics(self):
         metrics = {}
@@ -343,6 +375,14 @@ class GenEval(object):
         metrics.update(self.get_uniqueness())
         metrics.update(self.get_novelty())
         metrics.update(self.get_unique_and_novel())
+        if self.compute_unn_pg:
+            metrics.update(self.get_unique_and_novel_by_point_group())
+        if self.save_unn_indices:
+            metrics.update({
+                "unique_idx": self.unique_idx,
+                "novel_idx": self.novel_idx,
+                "unn_idx": self.unn_idx,
+            })
         # metrics.update(self.get_density_wdist())
         # metrics.update(self.get_num_elem_wdist())
         # metrics.update(self.get_prop_wdist())
@@ -460,7 +500,8 @@ def run_compute_metrics(args):
 
         gen_evaluator = GenEval(
             gen_crys, db_crys, eval_model_name=eval_model_name, n_samples=args.n_samples,
-            unique_algo=args.unique_algo, unique_sym=args.unique_sym,
+            unique_algo=args.unique_algo, unique_sym=args.unique_sym, compute_unn_pg=args.compute_unn_pg,
+            save_unn_indices=args.save_unn_indices,
         )
         gen_metrics = gen_evaluator.get_metrics()
         all_metrics.update(gen_metrics)

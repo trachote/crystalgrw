@@ -64,16 +64,6 @@ class BaseGRW(nn.Module):
         W = W * tan_vec
         return manifold.exp(W, x).detach()
 
-    def convert_score(self, x, scores, t, num_atoms):
-        if "atom_types" in self.manifolds:
-            f = "atom_types"
-            scores[f] = self.manifolds[f].simp_to_hpc(scores[f].squeeze(1))
-            scores[f] = (self.manifolds[f].log(scores[f], x[f]) /
-                         t.repeat_interleave(num_atoms, dim=0).unsqueeze(-1))
-        if "lattices" in self.manifolds:
-            scores["lattices"] = scores["lattices"].view(-1, 3, 3)
-        return scores
-
     def grw(self, x_0, T, N,
             num_atoms,
             score_fn=None,
@@ -125,6 +115,16 @@ class BaseGRW(nn.Module):
             x_inv[f] = self.manifolds[f].log(x_0[f], x_t[f])
         return x_inv
 
+    def convert_score(self, x, scores, t, num_atoms):
+        if "atom_types" in self.manifolds:
+            f = "atom_types"
+            scores[f] = self.manifolds[f].simp_to_hpc(scores[f].squeeze(1))
+            scores[f] = (self.manifolds[f].log(scores[f], x[f]) /
+                         t.repeat_interleave(num_atoms, dim=0).unsqueeze(-1))
+        if "lattices" in self.manifolds:
+            scores["lattices"] = scores["lattices"].view(-1, 3, 3)
+        return scores
+
     def transform(self, x):
         if "atom_types" in self.manifolds:
             f = "atom_types"
@@ -139,20 +139,21 @@ class BaseGRW(nn.Module):
         if "atom_types" in self.manifolds:
             f = "atom_types"
             x[f] = self.manifolds[f].simp_from_hpc(x[f])
-            if self.sample_type_method == "mnm":
+            if self.sample_type_method == "multinomial":
                 x[f] = x[f].multinomial(num_samples=1).squeeze(1) + 1
-            elif self.sample_type_method == "max":
+            elif self.sample_type_method == "argmax":
                 x[f] = x[f].argmax(dim=-1) + 1
         return x
 
     def forward(self, x_0, t, num_atoms, N=None, score_fn=None,
-                stack_data=False, adaptive_timestep=1, progress_bar=None):
+                stack_data=False, adaptive_timestep=1, progress_bar=None,
+                sample_type_method="multinomial"):
         if (score_fn is None) and (self.forward_algo == "skip"):
             N = 1
         elif N is None:
             N = self.N
 
-        self.sample_type_method = "mnm" if score_fn is None else "max"
+        self.sample_type_method = sample_type_method
 
         x_0 = self.transform(x_0)
         x_t = self.grw(x_0, T=t, N=N,

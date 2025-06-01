@@ -1,0 +1,128 @@
+expname: mp_20
+
+PROJECT_ROOT: path-to-folder/crystalgrw
+
+core:
+  version: 0.0.1
+  tags:
+    - ${now:%Y-%m-%d}
+
+data: mp_20
+
+checkpoint_freq_every_n_epoch: 5
+
+logging:
+  # log frequency
+  val_check_interval: 5
+  progress_bar_refresh_rate: 20
+
+  # log every n epoch
+  log_freq_every_n_epoch: 1
+  check_val_every_n_epoch: 1
+
+  # lr_monitor:
+  #   logging_interval: "step"
+  #   log_momentum: False
+
+
+algo: crystalgrw
+
+model:
+  _target_: CrystalGRW
+  hidden_dim: 128
+  latent_dim: 0
+  max_atoms: ${data.max_atoms}
+  cost_frac_coords: 1.
+  cost_atomic_types: 1.
+  cost_lattices: 1.
+  cost_kld: 1.
+  max_neighbors: 12
+  radius: 12.
+  num_noise_level: 1000
+  predict_property: False
+  corrupt_coords: True
+  corrupt_lattices: True
+  corrupt_types: True
+  loss_type: Varadhan
+  is_decode: False
+  vae: False
+  uncond_prob: 0.1
+
+#encoder:
+#    _target_: null
+#
+#param_decoder:
+#    _target_: null
+
+sde:
+     _target_: GRW
+     b0_coord: 1e-4
+     bf_coord: 1
+     b0_lattice: 1e-3
+     bf_lattice: 20.
+     b0_type: 1e-6
+     bf_type: 5.
+     max_time: ${model.num_noise_level}
+     timesteps: 1
+     corrupt_coords: ${model.corrupt_coords}
+     corrupt_lattices: ${model.corrupt_lattices}
+     corrupt_types: ${model.corrupt_types}
+
+controller:
+     _target_: ConditionEmbedding
+     task: classification
+     num_class:
+       - 6
+       - 3
+       - 2
+       - 2
+       - 2
+       - 2
+       - 2
+     hidden_dim: ${model.hidden_dim}
+
+score_fn:
+    _target_: EquiformerV2Decoder
+    hidden_dim: ${model.hidden_dim}
+    latent_dim: ${model.latent_dim}
+    max_neighbors: ${model.max_neighbors}
+    radius: ${model.radius}
+    condition_time: embed
+    time_dim: ${model.hidden_dim}
+    noisy_atom_types: False
+    regress_energy: False
+    regress_forces: ${model.corrupt_coords}
+    regress_lattices: ${model.corrupt_lattices}
+    regress_atoms: ${model.corrupt_types}
+    embed_lattices: True
+    embed_coord: False
+    is_decode: ${model.is_decode}
+    lmax_list: [4]
+    mmax_list: [2]
+    condition_dim: ${model.hidden_dim}
+
+prop_model:
+    _target_: None
+
+optim:
+  optimizer:
+    #  Adam-oriented deep learning
+    _target_: AdamW
+    #  These are all default parameters for the Adam optimizer
+    lr: 4e-4
+    betas: [ 0.9, 0.999 ]
+    eps: 1e-08
+    weight_decay: 1e-3
+
+  use_lr_scheduler: True
+  lr_scheduler:
+    _target_: ReduceLROnPlateau
+    factor: 0.6
+    patience: 30
+    min_lr: 1e-6
+
+train:
+  # reproducibility
+  deterministic: False
+  random_seed: 42
+  max_epochs: 3000
