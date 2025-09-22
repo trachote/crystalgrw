@@ -264,11 +264,11 @@ class Trainer:
         return dist.get_rank() == 0 if self.run_ddp else True
 
     def train_start(self):
-        print(">>>TRAINING START<<<")
+        print("===TRAINING START===")
         pass
 
     def train_end(self, e):
-        print(">>>TRAINING END<<<")
+        print("===TRAINING END===")
         self.logging(e)
         if self.main_process():
             self.train_checkpoint_path = self.save_checkpoint(
@@ -373,7 +373,7 @@ class Trainer:
             ckpt_path = str(ckpts[ckpt_epochs.argsort()[-1]])
 
             print(f">>>>> Load the model from a checkpoint: {ckpt_path}")
-            ckpt = torch.load(ckpt_path, map_location=torch.device(self.device))
+            ckpt = torch.load(ckpt_path, map_location=torch.device(self.device), weights_only=False)
             self.current_epoch = ckpt["epoch"] + 1
             self.model.load_state_dict(ckpt["model_state_dict"])
 
@@ -399,7 +399,7 @@ class Trainer:
                     val_epochs = np.array([int(ck.split("/")[-1].split(".")[0].split("=")[1]) for ck in val_ckpts])
                     val_path = str(val_ckpts[val_epochs.argsort()[-1]])
                     print(f">>>>> Load the val model from a checkpoint: {val_path}")
-                    ckpt = torch.load(val_path, map_location=torch.device(self.device))
+                    ckpt = torch.load(val_path, map_location=torch.device(self.device), weights_only=False)
             else:
                 print("No VAL checkpoints exist, set the last TRAIN checkpoint as the min val")
 

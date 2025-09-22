@@ -20,7 +20,7 @@ class BaseDecoder(nn.Module):
             num_targets=1,
             regress_logvars=False,
             time_dim=128,
-            noisy_atom_types=False,
+            embed_noisy_types=False,
             embed_lattices=True,
             embed_coord=False,
             condition_dim=0,
@@ -35,7 +35,7 @@ class BaseDecoder(nn.Module):
         self.max_num_neighbors = max_neighbors
         self.regress_logvars = regress_logvars
         self.condition_time = condition_time
-        self.noisy_atom_types = noisy_atom_types
+        self.embed_noisy_types = embed_noisy_types
         self.regress_energy = regress_energy
         self.regress_forces = regress_forces
         self.regress_atoms = regress_atoms
@@ -67,7 +67,7 @@ class BaseDecoder(nn.Module):
                 self.fc_time[i].weight.data = default_init()(self.fc_time[i].weight.data.shape)
                 nn.init.zeros_(self.fc_time[i].bias)
 
-        if self.noisy_atom_types:
+        if self.embed_noisy_types:
             noisy_atom_dim = hidden_dim
             self.noisy_atom_emb = nn.Sequential(nn.Linear(MAX_ATOMIC_NUM - 1, noisy_atom_dim * 4),
                                                 nn.ReLU(),
@@ -125,7 +125,7 @@ class BaseDecoder(nn.Module):
             time_emb = time_emb.repeat_interleave(natoms, dim=0)
             node_feats.append(time_emb)
 
-        if self.noisy_atom_types:
+        if self.embed_noisy_types:
             node_feats.append(self.noisy_atom_emb(noisy_atom_types))
 
         if self.embed_lattices:
@@ -194,7 +194,7 @@ class GemNetTDecoder(BaseDecoder):
             num_targets=1,
             regress_logvars=False,
             time_dim=128,
-            noisy_atom_types=False,
+            embed_noisy_types=False,
             regress_energy=False,
             regress_forces=True,
             regress_atoms=True,
@@ -213,7 +213,7 @@ class GemNetTDecoder(BaseDecoder):
             condition_time=condition_time,
             regress_logvars=regress_logvars,
             time_dim=time_dim,
-            noisy_atom_types=noisy_atom_types,
+            embed_noisy_types=embed_noisy_types,
             regress_atoms=regress_atoms,
             regress_lattices=regress_lattices,
             embed_lattices=embed_lattices,
@@ -235,7 +235,7 @@ class GemNetTDecoder(BaseDecoder):
             scale_file=scale_file,
             condition_time=self.condition_time,
             time_dim=self.time_dim,
-            noisy_atom_types=False,  # self.noisy_atom_types,
+            # embed_noisy_types=False,
             extra_dim=self.extra_dim,
             regress_atoms=self.regress_atoms,
             regress_lattices=self.regress_lattices,
@@ -255,7 +255,7 @@ class EquiformerV2Decoder(BaseDecoder):
             num_targets=1,
             regress_logvars=False,
             time_dim=128,
-            noisy_atom_types=False,
+            embed_noisy_types=False,
             regress_energy=False,
             regress_forces=True,
             regress_atoms=True,
@@ -318,7 +318,7 @@ class EquiformerV2Decoder(BaseDecoder):
             num_targets=num_targets,
             regress_logvars=regress_logvars,
             time_dim=time_dim,
-            noisy_atom_types=noisy_atom_types,
+            embed_noisy_types=embed_noisy_types,
             regress_energy=regress_energy,
             regress_forces=regress_forces,
             regress_atoms=regress_atoms,

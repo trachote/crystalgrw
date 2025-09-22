@@ -3,7 +3,7 @@
 
 ### Version
 
-Current version: **1.1.0**
+Current version: **1.1.1**
 
 See the [CHANGELOG.md](./CHANGELOG.md) for details on updates.
 
@@ -78,10 +78,13 @@ python compute_metrics.py --root_path path/to/folder \
    - `conf/mp20_condition.yaml`: Configuration for training with controlled conditions.
 3. Train the model using the **Training a Model** command.
 
-### Generate structures from pretrained models
-1. Unzip the pretrained models into your project folder.
-2. Use the **Generating Crystal Structures** command to generate structures.
-3. Use the **Generating Structures with Guided Conditions** command to generate structures based on specific point groups.
+[//]: # (### Generate structures from pretrained models)
+
+[//]: # (1. Unzip the pretrained models into your project folder.)
+
+[//]: # (2. Use the **Generating Crystal Structures** command to generate structures.)
+
+[//]: # (3. Use the **Generating Structures with Guided Conditions** command to generate structures based on specific point groups.)
 
 ## Configurations
 CrystalGRW can choose to corrupt either of three crystal properties:
@@ -93,16 +96,19 @@ Depending on the specific task, you may want to alter only some of these propert
 Adjust the settings in the configuration file by modifying the `corrupt_{property}` tags in file `conf/*.yaml` accordingly.
 
 ## Pretrained Models
-To use pretrained models, download them from the following link: 
-[Pretrained Models Download](<https://zenodo.org/records/14948252>)
+To use pretrained models, download them using the following command
+```
+git lfs pull -I checkpoints/<model-name>
+```
 
-### Loading a Pretrained Model
-1. Once downloaded, unzip the model into your project folder.
-2. `pretrained_mp20_2024-09-24` a model trained on MP-20 dataset, 
+### Generating structures from pretrained models
+1. Once downloaded, edit the `PROJECT_ROOT` path in `hparams.yaml` file to point to your local project directory.
+2. `pretrained_alexmp20_2025-04-15` a model trained on ALEX-MP-20 dataset, 
 use the **Generating Crystal Structures** command to generate structures. 
-3. `pretrained_mp20_cond_2024-12-01` a model trained on MP-20 dataset and conditioned on point groups, 
+3. `pretrained_alexmp20_pointgroups_2025-04-18` a model trained on ALEX-MP-20 dataset and conditioned on point groups, 
 use the **Generating Structures with Guided Conditions** command to generate structures.
 
+Models trained on the MP-20 dataset can be downloaded from the following link: <https://zenodo.org/records/14948252>.
 
 ## Citations
 If you use CrystalGRW in your research, please cite:

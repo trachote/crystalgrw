@@ -22,7 +22,7 @@ from ..models.base import Trainer
 from ..samplers.sample import sample
 
 from ..gnn.embeddings import MAX_ATOMIC_NUM
-from ..common.stats import MP20_NATOM_DIST
+from ..common.stats import MP20_NATOM_DIST, ALEXMP20_NATOM_DIST
 
 
 def sample_properties(model, natoms, batch=None, corrupt_coords=True,
@@ -52,13 +52,22 @@ def sample_natoms(model, sample_num_atoms, batch_size, device="cpu"):
     if isinstance(sample_num_atoms, dict):
         natoms = torch.randint(**sample_num_atoms,
                                size=(batch_size,)).to(device)
+
     elif isinstance(sample_num_atoms, int):
         natoms = torch.tensor([sample_num_atoms] * batch_size).to(device)
+
     elif sample_num_atoms == "mp20_stat":
         p = torch.tensor(MP20_NATOM_DIST).float()
         p = p / p.sum(-1)
         natoms = torch.multinomial(p, num_samples=batch_size,
                                    replacement=True).to(device)
+
+    elif sample_num_atoms == "alexmp20_stat":
+        p = torch.tensor(ALEXMP20_NATOM_DIST).float()
+        p = p / p.sum(-1)
+        natoms = torch.multinomial(p, num_samples=batch_size,
+                                   replacement=True).to(device)
+
     else:
         raise NotImplementedError(f"{sample_num_atoms} is not implemented.")
 
@@ -316,11 +325,16 @@ def run_eval(rank, world_size, args):
     device = evaluator.device
 
     grad_context = torch.no_grad()
+    sample_type_method = args.sample_type_method \
+        if not args.force_atom_types else "force_atom_types"
+
+    if args.force_atom_types and cfg.model.corrupt_types:
+        model.sde_fn.manifolds.pop("atom_types")
 
     ld_kwargs = SimpleNamespace(
         cfg=cfg,
         step_lr=args.step_lr,
-        sample_type_method=args.sample_type_method,
+        sample_type_method=sample_type_method,
         adaptive_timestep=args.adaptive_timestep,
         save_traj=args.save_traj,
         disable_bar=args.disable_bar,

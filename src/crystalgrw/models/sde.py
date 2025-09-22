@@ -2,6 +2,7 @@ import numpy as np
 import math
 from copy import copy
 from omegaconf import ListConfig
+from functools import partial
 
 import torch
 import torch.nn as nn
@@ -45,7 +46,7 @@ class BaseGRW(nn.Module):
         if isinstance(b_f, ListConfig):
             b_f = torch.zeros_like(tan_vec)
             for i, b_fi in enumerate(b_f):
-                b_f[:,i] += b_fi
+                b_f[:, i] += b_fi
         if self.forward_algo == "skip":
             sigma = (b_0 * n + 0.5 * (b_f - b_0) * (n ** 2)).sqrt()
         else:
@@ -82,9 +83,7 @@ class BaseGRW(nn.Module):
             if score_fn is not None:
                 n = T - k * t
                 p = t * (N - k) ** adaptive_timestep
-                x_ret = self.retransform(x_t)
-                scores = score_fn(t=n, noisy_atom_types=x_ret["atom_types"],
-                                  **x_ret)
+                scores = score_fn(t=n, **self.retransform(x_t))
                 scores = self.convert_score(x_t, scores, n, num_atoms)
             else:
                 if (N == 1) and (self.forward_algo == "skip"):
@@ -134,26 +133,35 @@ class BaseGRW(nn.Module):
             x[f] = self.manifolds[f].simp_to_hpc(x[f])
         return x
 
-    def retransform(self, x):
+    def retransform(self, x, sample_type_method, embed_noisy_types=False):
         x = copy(x)
         if "atom_types" in self.manifolds:
             f = "atom_types"
-            x[f] = self.manifolds[f].simp_from_hpc(x[f])
-            if self.sample_type_method == "multinomial":
-                x[f] = x[f].multinomial(num_samples=1).squeeze(1) + 1
-            elif self.sample_type_method == "argmax":
-                x[f] = x[f].argmax(dim=-1) + 1
+            if embed_noisy_types:
+                x["noisy_atom_types"] = x[f].clone()
+            if sample_type_method == "force_atom_types":
+                pass
+            else:
+                x[f] = self.manifolds[f].simp_from_hpc(x[f])
+                if sample_type_method == "multinomial":
+                    x[f] = x[f].multinomial(num_samples=1).squeeze(1) + 1
+                elif sample_type_method == "argmax":
+                    x[f] = x[f].argmax(dim=-1) + 1
         return x
 
     def forward(self, x_0, t, num_atoms, N=None, score_fn=None,
                 stack_data=False, adaptive_timestep=1, progress_bar=None,
-                sample_type_method="multinomial"):
+                sample_type_method="multinomial", embed_noisy_types=False):
         if (score_fn is None) and (self.forward_algo == "skip"):
             N = 1
         elif N is None:
             N = self.N
 
-        self.sample_type_method = sample_type_method
+        self.retransform = partial(
+            self.retransform,
+            sample_type_method=sample_type_method,
+            embed_noisy_types=embed_noisy_types
+        )
 
         x_0 = self.transform(x_0)
         x_t = self.grw(x_0, T=t, N=N,

@@ -76,7 +76,7 @@ score_fn:
     radius: ${model.radius}
     condition_time: embed
     time_dim: ${model.hidden_dim}
-    noisy_atom_types: False
+    embed_noisy_types: False
     regress_energy: False
     regress_forces: ${model.corrupt_coords}
     regress_lattices: ${model.corrupt_lattices}

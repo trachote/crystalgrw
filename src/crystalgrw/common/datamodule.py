@@ -143,7 +143,7 @@ class CrystDataModule:
                 dataset,
                 # shuffle=False,
                 batch_size=self.batch_size.test,
-                sampler=DistributedSampler(dataset, shuffle=False),
+                sampler=sampler,
                 num_workers=self.num_workers.test,
                 worker_init_fn=worker_init_fn,
             ), sampler)

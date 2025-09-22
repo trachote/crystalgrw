@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.1] - 2025-09-22
+
+### Added
+- Added checkpoints for pretrained models with the ALEX-MP-20 dataset.
+- Updated dataset loading from CIF string or structure dictionary from `pymatgen`.
+
+### Changed
+- Renamed `noisy_atom_types` parameters for `score_fn` in to `embed_noisy_types`; it must also be renamed in the new config files and hparam.yaml files.
+
+### Fixed
+- Set `weights_only` to `False` when models are loaded in case dealing with newer Pytorch version.
+- Fixed `test_dataloader` when `run_ddp` is `False`.
+- Fixed `MP20_STAT` values.
+
 ## [1.1.0] - 2025-06-01
 
 ### Added

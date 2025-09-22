@@ -1,0 +1,266 @@
+expname: alex_mp_20
+PROJECT_ROOT: /path/to/prject/crystalgrw
+core:
+  version: 0.0.1
+  tags:
+  - '2025-04-01'
+data:
+  root_path: ${PROJECT_ROOT}/data/alex_mp_20
+  prop:
+  - n1
+  - n2
+  - n3
+  - mh
+  - mv
+  - md
+  - i
+  prop_classes: null
+  num_targets: 1
+  niggli: true
+  primitive: true
+  graph_method: crystalnn
+  lattice_scale_method: scale_length
+  preprocess_workers: 30
+  readout: mean
+  max_atoms: 20
+  otf_graph: false
+  eval_model_name: alexmp20
+  train_max_epochs: 1000
+  early_stopping_patience: 100000
+  early_stopping_patience_epoch: 300
+  teacher_forcing_max_epoch: 500
+  datamodule:
+    _target_: CrystDataset
+    datasets:
+      train:
+        _target_: crystalgrw.common.dataset.CrystDataset
+        name: Formation energy train
+        path: ${PROJECT_ROOT}/data/alex_mp_20/train.csv
+        prop:
+        - n1
+        - n2
+        - n3
+        - mh
+        - mv
+        - md
+        - i
+        niggli: true
+        primitive: true
+        graph_method: crystalnn
+        lattice_scale_method: scale_length
+        preprocess_workers: 30
+      val:
+      - _target_: crystalgrw.common.dataset.CrystDataset
+        name: Formation energy val
+        path: ${PROJECT_ROOT}/data/alex_mp_20/val.csv
+        prop:
+        - n1
+        - n2
+        - n3
+        - mh
+        - mv
+        - md
+        - i
+        niggli: true
+        primitive: true
+        graph_method: crystalnn
+        lattice_scale_method: scale_length
+        preprocess_workers: 30
+      test:
+      - _target_: crystalgrw.common.dataset.CrystDataset
+        name: Formation energy test
+        path: ${PROJECT_ROOT}/data/alex_mp_20/val.csv
+        prop:
+        - n1
+        - n2
+        - n3
+        - mh
+        - mv
+        - md
+        - i
+        niggli: true
+        primitive: true
+        graph_method: crystalnn
+        lattice_scale_method: scale_length
+        preprocess_workers: 30
+    num_workers:
+      train: 0
+      val: 0
+      test: 0
+    batch_size:
+      train: 32
+      val: 64
+      test: 64
+checkpoint_freq_every_n_epoch: 5
+logging:
+  val_check_interval: 5
+  progress_bar_refresh_rate: 20
+  log_freq_every_n_epoch: 1
+  check_val_every_n_epoch: 1
+algo: crystalgrw
+model:
+  _target_: CrystalGRW
+  hidden_dim: 128
+  latent_dim: 0
+  max_atoms: 20
+  cost_coord: 10.0
+  cost_type: 1000.0
+  cost_lattice: 1.0
+  cost_kld: 1.0
+  max_neighbors: 12
+  radius: 12.0
+  num_noise_level: 1000
+  predict_property: false
+  corrupt_coords: true
+  corrupt_lattices: true
+  corrupt_types: true
+  loss_type: Varadhan
+  is_decode: false
+  vae: false
+  uncond_prob: 0.1
+  predict_property_class: false
+  data:
+    root_path: ${PROJECT_ROOT}/data/alex_mp_20
+    prop:
+    - n1
+    - n2
+    - n3
+    - mh
+    - mv
+    - md
+    - i
+    prop_classes: null
+    num_targets: 1
+    niggli: true
+    primitive: true
+    graph_method: crystalnn
+    lattice_scale_method: scale_length
+    preprocess_workers: 30
+    readout: mean
+    max_atoms: 20
+    otf_graph: false
+    eval_model_name: alexmp20
+    train_max_epochs: 1000
+    early_stopping_patience: 100000
+    early_stopping_patience_epoch: 300
+    teacher_forcing_max_epoch: 500
+    datamodule:
+      _target_: CrystDataset
+      datasets:
+        train:
+          _target_: crystalgrw.common.dataset.CrystDataset
+          name: Formation energy train
+          path: ${PROJECT_ROOT}/data/alex_mp_20/train.csv
+          prop:
+          - n1
+          - n2
+          - n3
+          - mh
+          - mv
+          - md
+          - i
+          niggli: true
+          primitive: true
+          graph_method: crystalnn
+          lattice_scale_method: scale_length
+          preprocess_workers: 30
+        val:
+        - _target_: crystalgrw.common.dataset.CrystDataset
+          name: Formation energy val
+          path: ${PROJECT_ROOT}/data/alex_mp_20/val.csv
+          prop:
+          - n1
+          - n2
+          - n3
+          - mh
+          - mv
+          - md
+          - i
+          niggli: true
+          primitive: true
+          graph_method: crystalnn
+          lattice_scale_method: scale_length
+          preprocess_workers: 30
+        test:
+        - _target_: crystalgrw.common.dataset.CrystDataset
+          name: Formation energy test
+          path: ${PROJECT_ROOT}/data/alex_mp_20/val.csv
+          prop:
+          - n1
+          - n2
+          - n3
+          - mh
+          - mv
+          - md
+          - i
+          niggli: true
+          primitive: true
+          graph_method: crystalnn
+          lattice_scale_method: scale_length
+          preprocess_workers: 30
+      num_workers:
+        train: 0
+        val: 0
+        test: 0
+      batch_size:
+        train: 32
+        val: 64
+        test: 64
+  algo: crystalgrw
+sde:
+  _target_: GRW
+  b0_t3: 0.0001
+  bf_t3: 1
+  b0_r3: 0.001
+  bf_r3: 20.0
+  b0_hpc: 1.0e-06
+  bf_hpc: 5.0
+  max_time: 1000
+  timesteps: 1
+  corrupt_coords: true
+  corrupt_lattices: true
+  corrupt_types: true
+score_fn:
+  _target_: EquiformerV2Decoder
+  hidden_dim: 128
+  latent_dim: 0
+  max_neighbors: 12
+  radius: 12.0
+  condition_time: embed
+  time_dim: 128
+  embed_noisy_types: false
+  regress_energy: false
+  regress_forces: true
+  regress_lattices: true
+  regress_atoms: true
+  embed_lattices: true
+  embed_coord: false
+  is_decode: false
+  lmax_list:
+  - 4
+  mmax_list:
+  - 2
+  condition_dim: 0
+prop_model:
+  _target_: None
+optim:
+  optimizer:
+    _target_: AdamW
+    lr: 0.0004
+    betas:
+    - 0.9
+    - 0.999
+    eps: 1.0e-08
+    weight_decay: 0.001
+  use_lr_scheduler: true
+  lr_scheduler:
+    _target_: ReduceLROnPlateau
+    factor: 0.6
+    patience: 30
+    min_lr: 1.0e-06
+train:
+  deterministic: false
+  random_seed: 42
+  max_epochs: 3000
+output_dir: checkpoints/pretrained_alexmp20_2025-04-15
+ckpt_load: latest

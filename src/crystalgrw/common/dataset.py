@@ -15,8 +15,16 @@ def load_cif_data(df, primitive=True):
     from pymatgen.core import Structure
     tqdm.pandas()
 
-    def get_data_dict(cif_txt):
-        struct = Structure.from_str(cif_txt, "cif", primitive=primitive)
+    def get_data_dict(struct_data):
+        if isinstance(struct_data, str):
+            struct = Structure.from_str(struct_data, "cif", primitive=primitive)
+        elif isinstance(struct_data, dict):
+            struct = Structure.from_dict(struct_data)
+            if primitive:
+                struct = struct.get_primitive_structure()
+        else:
+            raise TypeError("Structure data must be a cif str or `Structure` dict")
+
         data = {}
         data["lengths"] = np.array(struct.lattice.lengths)
         data["angles"] = np.array(struct.lattice.angles)
@@ -28,8 +36,9 @@ def load_cif_data(df, primitive=True):
     def get_id(material_id):
         return {"material_id": material_id}
 
+    data_type = "cif" if "cif" in df.columns else "structure_dict"
     return df.progress_apply(
-        lambda row: {**get_data_dict(row["cif"]), **get_id(row["material_id"])}, axis=1)
+        lambda row: {**get_data_dict(row[data_type]), **get_id(row["material_id"])}, axis=1)
 
 
 def load_xyz_data(path, data_type="ase_traj"):
@@ -62,12 +71,16 @@ def load_xyz_data(path, data_type="ase_traj"):
 
 
 def load_data(path, data_type=None, prop_list=None, primitive=True):
-    df = pd.read_csv(path)
-
-    if data_type == "cif":
+    if path.endswith(".csv") or path.endswith(".json"):
+        if path.endswith(".csv"):
+            df = pd.read_csv(path)
+        elif path.endswith(".json"):
+            df = pd.read_json(path)
+        else:
+            raise NotImplementedError
         cached_data = load_cif_data(df, primitive).tolist()
 
-    elif (data_type == "ase_traj") or (data_type == "xyz"):
+    elif path.endswith(".xyz") or path.endswith(".traj"):
         cached_data = load_xyz_data(path, data_type=data_type)
 
     else:
@@ -87,7 +100,7 @@ def load_data(path, data_type=None, prop_list=None, primitive=True):
     if prop_list is not None:
         try:
             material_ids = df["material_id"].tolist()
-            props = {prop: df[prop].values for prop in prop_list}
+            props = {prop: df[prop].values if prop in df.columns else np.array([np.nan]*len(df)) for prop in prop_list}
         except Exception as e:
             raise Exception(e)
 

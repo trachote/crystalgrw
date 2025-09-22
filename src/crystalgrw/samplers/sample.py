@@ -9,7 +9,6 @@ from ..common.data_utils import lattice_params_from_matrix
 def sample(model, frac_coords, lattices, atom_types, natoms, ld_kwargs,
            z=None, labels=None, guidance_strength=1, input_encoder=None,
            grad_context=None):
-
     if (model.encoder is not None) and (z is None):
         assert input_encoder is not None
         z = model.encoder(input_encoder)
@@ -39,13 +38,17 @@ def sample(model, frac_coords, lattices, atom_types, natoms, ld_kwargs,
     assert grad_context is not None
 
     with grad_context:
-        x_all, _ = model.sde_fn(x_T, T,
-                                natoms,
-                                N=model.T,
-                                score_fn=score_fn,
-                                stack_data=ld_kwargs.save_traj,
-                                adaptive_timestep=ld_kwargs.adaptive_timestep,
-                                progress_bar=progress_bar)
+        x_all, _ = model.sde_fn(
+            x_T, T,
+            natoms,
+            N=model.T,
+            score_fn=score_fn,
+            stack_data=ld_kwargs.save_traj,
+            adaptive_timestep=ld_kwargs.adaptive_timestep,
+            sample_type_method=ld_kwargs.sample_type_method,
+            embed_noisy_types=model.score_fn.embed_noisy_types,
+            progress_bar=progress_bar
+        )
 
     x = x_all[-1] if ld_kwargs.save_traj else x_all
     lengths, angles = lattice_params_from_matrix(
