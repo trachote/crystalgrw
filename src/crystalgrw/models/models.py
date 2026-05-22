@@ -77,7 +77,7 @@ class CrystalGRW(BaseModel):
                "atom_types": atom_types,
                }
 
-        x_t, x_inv = self.sde_fn(x_0, t, natoms)
+        x_t, x_inv = self.sde_fn(x_0, t, natoms, embed_noisy_types=self.hparams.embed_noisy_types)
 
         # Embed conditions
         if self.control_fn is not None:
@@ -93,7 +93,6 @@ class CrystalGRW(BaseModel):
                                natoms=natoms,
                                cond_feat=condition,
                                batch=batch_idx,
-                               noisy_atom_types=x_t["atom_types"],
                                )
 
         # Compute losses

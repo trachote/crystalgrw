@@ -139,6 +139,8 @@ class BaseGRW(nn.Module):
             f = "atom_types"
             if embed_noisy_types:
                 x["noisy_atom_types"] = x[f].clone()
+            else:
+                x["noisy_atom_types"] = None
             if sample_type_method == "force_atom_types":
                 pass
             else:

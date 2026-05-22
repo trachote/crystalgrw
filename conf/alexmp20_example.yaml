@@ -43,6 +43,8 @@ model:
   corrupt_coords: True
   corrupt_lattices: True
   corrupt_types: True
+  embed_noisy_types: True
+  embed_lattices: True
   loss_type: Varadhan
   is_decode: False
   vae: False
@@ -76,12 +78,12 @@ score_fn:
     radius: ${model.radius}
     condition_time: embed
     time_dim: ${model.hidden_dim}
-    embed_noisy_types: False
     regress_energy: False
     regress_forces: ${model.corrupt_coords}
     regress_lattices: ${model.corrupt_lattices}
     regress_atoms: ${model.corrupt_types}
-    embed_lattices: True
+    embed_noisy_types: ${model.embed_noisy_types}
+    embed_lattices: ${model.embed_lattices}
     embed_coord: False
     is_decode: ${model.is_decode}
     lmax_list: [4]
